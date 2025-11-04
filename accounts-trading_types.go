@@ -224,9 +224,9 @@ type FullOrder struct {
 	OrderType                string
 	CancelTime               string
 	ComplexOrderStrategyType string
-	Quantity                 int
-	FilledQuantity           int
-	RemainingQuantity        int
+	Quantity                 float64
+	FilledQuantity           float64
+	RemainingQuantity        float64
 	RequestedDestination     string
 	DestinationLinkName      string
 	ReleaseTime              string
@@ -235,7 +235,7 @@ type FullOrder struct {
 	StopPriceLinkType        string
 	StopPriceOffset          int
 	StopType                 string
-	Price                    string
+	Price                    float64
 	TaxLotMethod             string
 	OrderLegCollection       []FullOrderLeg
 	ActivationPrice          int
@@ -278,7 +278,7 @@ type FullOrderLeg struct {
 	Instrument     InstrumentRef
 	Instruction    string
 	PositionEffect string
-	Quantity       int
+	Quantity       float64
 	QuantityType   string
 	DivCapGains    string
 	ToSymbol       string
