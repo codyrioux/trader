@@ -26,26 +26,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/bytedance/sonic"
 	o "github.com/go-schwab/utils/oauth"
-	"github.com/joho/godotenv"
 	"golang.org/x/oauth2"
 )
 
 type Agent struct {
-	Client *o.AuthorizedClient
-	Tokens Token
+	Client       *o.AuthorizedClient
+	Tokens       Token
+	appkey       string
+	secret       string
+	callback_url string
+	token_path   string
 }
 
 type Token struct {
@@ -53,6 +54,32 @@ type Token struct {
 	Refresh           string
 	BearerExpiration  time.Time
 	Bearer            string
+}
+
+type Option func(*Agent)
+
+func WithAppKey(appkey string) Option {
+	return func(a *Agent) {
+		a.appkey = appkey
+	}
+}
+
+func WithSecret(secret string) Option {
+	return func(a *Agent) {
+		a.secret = secret
+	}
+}
+
+func WithCallbackUrl(url string) Option {
+	return func(a *Agent) {
+		a.callback_url = url
+	}
+}
+
+func WithTokenPath(token_path string) Option {
+	return func(a *Agent) {
+		a.token_path = token_path
+	}
 }
 
 var (
@@ -64,37 +91,13 @@ var (
 
 // load env variables, check if you've run the program before
 func init() {
-	err := godotenv.Load(findAllEnvFiles()...)
-	isErrNil(err)
-	APPKEY = os.Getenv("APPKEY")
-	SECRET = os.Getenv("SECRET")
-	CBURL = os.Getenv("CBURL")
 	homedir, err := os.UserHomeDir()
 	isErrNil(err)
-	PATH = homedir + "/.config/go-schwab/.json"
+	PATH = homedir + "/.config/go-schwab/token.json"
 	if _, err := os.Stat(homedir + "/.config/go-schwab"); errors.Is(err, os.ErrNotExist) {
 		err := os.Mkdir(homedir+"/.config/go-schwab", 0750)
 		isErrNil(err)
 	}
-}
-
-// find all env files
-func findAllEnvFiles() []string {
-	var files []string
-	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		split := strings.Split(d.Name(), ".")
-		if len(split) > 1 {
-			if split[1] == "env" {
-				files = append(files, d.Name())
-			}
-		}
-		return err
-	})
-	isErrNil(err)
-	return files
 }
 
 // trim one FIRST & one LAST character in the string
@@ -137,16 +140,6 @@ func openBrowser(url string) {
 		log.Fatal("Unsupported platform.")
 	}
 	isErrNil(err)
-}
-
-// Execute a command @ stdin, receive stdout
-func execCommand(cmd *exec.Cmd) {
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	err := cmd.Run()
-	if err != nil {
-		log.Fatal(err.Error())
-	}
 }
 
 // Credit: https://go.dev/play/p/C2sZRYC15XN
@@ -237,13 +230,61 @@ func initiateLinux() Agent {
 
 func initiateMacWindows() Agent {
 	var agent Agent
-	// execCommand("openssl req -x509 -out localhost.crt -keyout localhost.key   -newkey rsa:2048 -nodes -sha256   -subj '/CN=localhost' -extensions EXT -config <(;printf "[dn]\nCN=localhost\n[req]\ndistinguished_name = dn\n[EXT]\nsubjectAltName=DNS.1:localhost,IP:127.0.0.1\nkeyUsage=digitalSignature\nextendedKeyUsage=serverAuth")")
-	agent = Agent{Client: o.Initiate(APPKEY, SECRET)}
+	agent = Agent{Client: o.Initiate(APPKEY, SECRET, CBURL)}
 	bytes, err := sonic.Marshal(agent.Client.Token)
 	isErrNil(err)
 	err = os.WriteFile(PATH, bytes, 0750)
 	isErrNil(err)
 	return agent
+}
+
+func NewAgent(options ...Option) *Agent {
+	var agent Agent
+	for _, option := range options {
+		option(&agent)
+	}
+
+	// Deal with legacy
+	APPKEY = agent.appkey
+	SECRET = agent.secret
+	CBURL = agent.callback_url
+
+	if _, err := os.Stat(PATH); errors.Is(err, os.ErrNotExist) {
+		agent.Client = o.Initiate(agent.appkey, agent.secret, agent.callback_url)
+		bytes, err := sonic.Marshal(agent.Client.Token)
+		if err == nil {
+			log.Fatalf("Error unmarshalling client token: %v", err)
+		}
+		err = os.WriteFile(PATH, bytes, 0750)
+		if err == nil {
+			log.Fatalf("Error writing client token to %s: %v", PATH, err)
+		}
+	} else {
+		var tok *oauth2.Token
+		body, err := os.ReadFile(PATH)
+		isErrNil(err)
+		err = sonic.Unmarshal(body, &tok)
+		isErrNil(err)
+		conf := &oauth2.Config{
+			ClientID:     agent.appkey, // Schwab App Key
+			ClientSecret: agent.secret, // Schwab App Secret
+			Endpoint: oauth2.Endpoint{
+				AuthURL:  "https://api.schwabapi.com/v1/oauth/authorize",
+				TokenURL: "https://api.schwabapi.com/v1/oauth/token",
+			},
+		}
+		tr := &http.Transport{
+			TLSClientConfig: &tls.Config{},
+		}
+		sslcli := &http.Client{Transport: tr}
+		ctx := context.WithValue(context.Background(), oauth2.HTTPClient, sslcli)
+		agent.Client = &o.AuthorizedClient{
+			conf.Client(ctx, tok),
+			tok,
+		}
+	}
+
+	return &agent
 }
 
 // create Agent - mac & windows
@@ -324,25 +365,30 @@ func (agent *Agent) Handler(req *http.Request) (*http.Response, error) {
 			agent = Reinitiate()
 		}
 	}
-	switch true {
-	case resp.StatusCode == 200:
+
+	if resp == nil {
+		log.Fatalf("Response in handler was nil")
+	}
+
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
 		return resp, nil
-	case resp.StatusCode == 401:
+	case http.StatusUnauthorized:
 		body, err := io.ReadAll(resp.Body)
 		isErrNil(err)
 		if strings.Contains(string(body), "\"status\": 500") {
 			return nil, WrapTraderError(ErrUnexpectedServer, resp)
 		}
 		return nil, WrapTraderError(ErrNeedReAuthorization, resp)
-	case resp.StatusCode == 403:
+	case http.StatusForbidden:
 		return nil, WrapTraderError(ErrForbidden, resp)
-	case resp.StatusCode == 404:
+	case http.StatusNotFound:
 		return nil, WrapTraderError(ErrNotFound, resp)
-	case resp.StatusCode == 500:
+	case http.StatusInternalServerError:
 		return nil, WrapTraderError(ErrUnexpectedServer, resp)
-	case resp.StatusCode == 503:
+	case http.StatusServiceUnavailable:
 		return nil, WrapTraderError(ErrTemporaryServer, resp)
-	case resp.StatusCode == 400:
+	case http.StatusBadRequest:
 		body, err := io.ReadAll(resp.Body)
 		isErrNil(err)
 		if strings.Contains(string(body), "\"status\": 500") {
@@ -359,6 +405,6 @@ func (agent *Agent) Handler(req *http.Request) (*http.Response, error) {
 		//   which contains Message string; Error []string
 		return nil, WrapTraderError(ErrValidation, resp)
 	default:
-		return nil, errors.New("error not defined")
+		return nil, fmt.Errorf("Error not defined for status %d %s", resp.StatusCode, resp.Status)
 	}
 }

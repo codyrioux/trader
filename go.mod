@@ -5,9 +5,10 @@ go 1.23.2
 require (
 	github.com/bytedance/sonic v1.12.6
 	github.com/go-schwab/utils/oauth v0.0.0-20241103230919-01b09562dfc2
-	github.com/joho/godotenv v1.5.1
 	golang.org/x/oauth2 v0.24.0
 )
+
+replace github.com/go-schwab/utils/oauth v0.0.0-20241103230919-01b09562dfc2 => ../utils/oauth
 
 require (
 	github.com/bytedance/sonic/loader v0.2.1 // indirect
