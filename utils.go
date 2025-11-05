@@ -252,11 +252,11 @@ func NewAgent(options ...Option) *Agent {
 	if _, err := os.Stat(PATH); errors.Is(err, os.ErrNotExist) {
 		agent.Client = o.Initiate(agent.appkey, agent.secret, agent.callback_url)
 		bytes, err := sonic.Marshal(agent.Client.Token)
-		if err == nil {
+		if err != nil {
 			log.Fatalf("Error unmarshalling client token: %v", err)
 		}
 		err = os.WriteFile(PATH, bytes, 0750)
-		if err == nil {
+		if err != nil {
 			log.Fatalf("Error writing client token to %s: %v", PATH, err)
 		}
 	} else {
